@@ -1,0 +1,10 @@
+# Archivos generados por Python
+__pycache__/
+*.py[cod]
+*$py.cla
+
+# Archivos de entorno
+.env
+
+# Archivos de registro
+*.log

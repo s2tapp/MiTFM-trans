@@ -1,8 +1,8 @@
-
 import os
 import time
 import requests
 import json
+import logging
 #for rabiitMQ
 import pika
 #For managing audio file
@@ -10,102 +10,130 @@ import librosa
 #For Pytorch
 import torch
 #Importing  openai
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+from transformers import WhisperForConditionalGeneration, WhisperProcessor
 #Importing Wav2Vec
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 
-tec1 = "whisper"
-tec2 = "wav2vec"
+# Configuración del registro
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', filename='audio_processing.log', filemode='a')
+logger = logging.getLogger(__name__)
+
+tech1 = "Whisper"
+tech2 = "Wav2vec"
+khz16 = 16000 
 donwloads_folder= "/tmp/python-data"
 donwloads_url= os.environ.get('DONWLOAD_URL',"http://localhost:8080/api/files/")
 rabbitmq_url = os.environ.get('RABBITMQ_URL', 'amqp://localhost?connection_attempts=10&retry_delay=10')
-print(donwloads_url)
-def process_whisper(filepath):
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+device = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+def process_whisper(audio):
     torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
     model_id = "openai/whisper-large-v3"
 
-    model = AutoModelForSpeechSeq2Seq.from_pretrained(
-        model_id, torch_dtype=torch_dtype, low_cpu_mem_usage=True, use_safetensors=True
-    )
-    model.to(device)
+    model = WhisperForConditionalGeneration.from_pretrained(model_id, torch_dtype=torch_dtype).to(device)
+    processor = WhisperProcessor.from_pretrained(model_id)
 
-    processor = AutoProcessor.from_pretrained(model_id)
+    input_features = processor(audio, return_tensors="pt", sampling_rate=khz16)
+    
+    outputs = model.generate(**input_features, output_scores=True, return_dict_in_generate=True)
 
-    pipe = pipeline(
-        "automatic-speech-recognition",
-        model=model,
-        tokenizer=processor.tokenizer,
-        feature_extractor=processor.feature_extractor,
-        max_new_tokens=128,
-        chunk_length_s=30,
-        batch_size=16,
-        return_timestamps=True,
-        torch_dtype=torch_dtype,
-        device=device,
-    )
+    predicted_ids = outputs.sequences
 
+    transcription = processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
 
-    # Loading the audio file
-    audio, rate = librosa.load(filepath)
+    #Cáculo de confianza (non-normalized score values)
+    scores = outputs.scores
 
-    result = pipe(audio)
-    return result["text"]
+    confidences = []
+    for score in scores:
+        probabilities = torch.softmax(score, dim=-1)
+        max_probabilities, _ = torch.max(probabilities, dim=-1)
+        confidences.append(max_probabilities.mean().item())
 
-def process_wav2vec(filepath):
-    # Loading the audio file
-    audio, rate = librosa.load(filepath, sr = 16000)
+    # Confianza media a través de todos los pasos de generación
+    confianza_media = round(sum(confidences) / len(confidences), 3)
 
-    # Importing Wav2Vec pretrained model
-    processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")
-    model = Wav2Vec2ForCTC.from_pretrained("facebook/wav2vec2-base-960h")
+    # Devolver la transcripción y la confianza
+    return transcription, confianza_media
 
-    # Taking an input value
-    input_values = processor(audio, return_tensors = "pt").input_values
+def process_wav2vec(audio):
 
-    # Storing logits (non-normalized prediction values)
+    model_id = "facebook/wav2vec2-large-960h-lv60-self"
+
+    model = Wav2Vec2ForCTC.from_pretrained(model_id).to(device)
+    processor = Wav2Vec2Processor.from_pretrained(model_id)
+
+    input_values = processor(audio, return_tensors = "pt", sampling_rate=khz16)["input_values"].to(device)
+
+    # guardando logits (non-normalized prediction values)
     logits = model(input_values).logits
 
-    # Storing predicted ids
-    prediction = torch.argmax(logits, dim = -1)
+    predicted_ids = torch.argmax(logits, dim = -1)
 
-    # Passing the prediction to the tokenzer decode to get the transcription
-    transcription = processor.decode(prediction[0])
+    transcription = processor.batch_decode(predicted_ids)[0]
 
-    return transcription
+    #Cáculo de confianza
+    probabilities = torch.softmax(logits, dim=-1)
 
-def process_audio(file_Path, technology):
-    if tec1 == technology:
-        return process_whisper(file_Path)
-    elif tec2 == technology:
-        return process_wav2vec(file_Path)
+    # Extraer la probabilidad máxima para cada token generado
+    max_probabilities, _ = torch.max(probabilities, dim=-1)
+
+    # Calcular la confianza media
+    confianza_media = round( max_probabilities.mean().item(), 3)  
+
+    return transcription.capitalize(), confianza_media
+
+def load_audio(file_Path):
+    # load file
+    speech, sr = librosa.load(file_Path)
+    if sr != khz16:
+        speech = librosa.resample(speech, orig_sr=sr, target_sr=khz16)
+    return speech
+
+def process_audio(file_path, technology):
+    # Loading the audio file
+    audio = load_audio(file_path)
+
+    if tech1 == technology:
+        return process_whisper(audio)
+    elif tech2 == technology:
+        return process_wav2vec(audio)
     else:
         return None
 
 def consume_and_respond(ch, method, properties, body):
     try:
-        startTime = time.time()
-
         # Deserializar el mensaje como un diccionario
         message = eval(body.decode("utf-8"))
+        logger.info(f"Mensaje recibido: {message}")
 
         # Extraer nombreAudio y el texto del diccionario
         technology = message.get("technology")
         audioName = message.get("audioName")
+        logger.info(f"Procesando audio '{audioName}' usando tecnología '{technology}'")
 
         filePath = download_file(audioName)
-
+        
         if filePath:
-            transcription = process_audio(filePath, technology)
+            startTime = time.time()
+            transcription, confianza_media = process_audio(filePath, technology)
+
+            endTime = time.time()
+            elapsedTime = round(endTime - startTime, 3)
             response = {
-                "respuesta": transcription if transcription is not None else "No se ha podido transcribir."
+                "respuesta": transcription if transcription is not None else "No se ha podido transcribir.",
+                "confianza": confianza_media,
+                "tiempoProceso": elapsedTime
             }
+            logger.info(f"Transcripción: {transcription}, Confianza: {confianza_media}, Tiempo de proceso: {elapsedTime} segundos")
         else:
             response = {
                 "respuesta": "No se ha podido descargar el archivo."
             }
-
+            logger.error("No se ha podido descargar el archivo.")
+        
         # Publicar la transcripción como respuesta
         channel.basic_publish(
             exchange='',
@@ -115,26 +143,22 @@ def consume_and_respond(ch, method, properties, body):
         )
          # Confirmar que se ha procesado el mensaje
         ch.basic_ack(delivery_tag=method.delivery_tag)
-
-        endTime = time.time()
-        elapsedTime = endTime - startTime
-        print("Tiempo necesario:", elapsedTime)        
     except Exception as e:
-        print("Error procesando audio:", str(e))
-      
+        logger.error(f"Error procesando audio: {str(e)}")
+
 def download_file(file_name):
     file_path = os.path.join(donwloads_folder, file_name)
-    url = donwloads_url+file_name
+    url = donwloads_url + file_name
 
     response = requests.get(url)
     
     if response.status_code == 200:
         with open(file_path, 'wb') as f:
             f.write(response.content)
-        print(f"Archivo descargado como '{file_name}'")
+        logger.info(f"Archivo descargado como '{file_name}'")
         return file_path
     else:
-        print("Error al descargar el archivo:", response.status_code)
+        logger.error(f"Error al descargar el archivo: {response.status_code}")
         return None
 
 os.makedirs(donwloads_folder, exist_ok=True)
@@ -145,9 +169,10 @@ channel = connection.channel()
 channel.basic_consume(queue='audio_queue', on_message_callback=consume_and_respond)
 
 try:
-    print('Esperando mensajes...')
+    logger.info('Esperando mensajes...')
     channel.start_consuming()
 except KeyboardInterrupt:
-    print("Proceso interrumpido")
+    logger.info("Proceso interrumpido")
 finally:
     connection.close()
+    logger.info("Conexión cerrada")
