@@ -1,4 +1,4 @@
-# Procesamiento de Audio
+# TuVozATexto (Procesamiento de Audio)
 
 Este repositorio contiene un script en Python para procesar archivos de audio utilizando dos tecnologías de vanguardia: Whisper y Wav2vec. El script descarga archivos de audio de una URL especificada, los procesa y devuelve la transcripción del audio junto con la confianza en la transcripción y el tiempo de procesamiento.
 
