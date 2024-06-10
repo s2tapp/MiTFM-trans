@@ -2,6 +2,8 @@
 
 Este repositorio contiene un script en Python para procesar archivos de audio utilizando dos tecnologías de vanguardia: Whisper y Wav2vec. El script descarga archivos de audio de una URL especificada, los procesa y devuelve la transcripción del audio junto con la confianza en la transcripción y el tiempo de procesamiento.
 
+**Nota:** Antes de utilizar este script, asegúrate de ejecutar primero el proyecto [MiTFM-back](https://github.com/uva2023/MiTFM-back), que proporciona la API necesaria para descargar los archivos de audio y comunicarse con el script de procesamiento.
+
 ## Requisitos
 
 - Python 3.x
@@ -48,4 +50,4 @@ Siéntete libre de abrir un issue o enviar un pull request con cualquier mejora 
 
 ## Licencia
 
-Este proyecto está bajo la licencia MIT License.
+Este proyecto está bajo la licencia Haz_con_ello_lo_que_quieras_pero_no_me_marees License.
