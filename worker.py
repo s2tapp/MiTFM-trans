@@ -166,6 +166,9 @@ os.makedirs(donwloads_folder, exist_ok=True)
 connection = pika.BlockingConnection(pika.URLParameters(rabbitmq_url))
 channel = connection.channel()
 
+# asegura la creación de la cola
+channel.queue_declare(queue='audio_queue', durable=True)
+
 channel.basic_consume(queue='audio_queue', on_message_callback=consume_and_respond)
 
 try:
