@@ -42,7 +42,7 @@ Este repositorio contiene un script en Python para procesar archivos de audio ut
    python3 worker.py
    ```
 
-El script estará a la espera de mensajes en la cola 'audio_queue' de RabbitMQ. Cuando se reciba un mensaje, descargará el archivo de audio especificado, lo procesará utilizando la tecnología especificada (Whisper o Wav2vec), y responderá con la transcripción, la confianza en la transcripción y el tiempo de procesamiento.
+El script estará a la espera de mensajes en la cola 'audio_queue' de RabbitMQ. Cuando se reciba un mensaje, descargará el archivo de audio especificado, lo procesará utilizando la tecnología indicada (Whisper o Wav2vec), y responderá con la transcripción, la confianza en la transcripción y el tiempo de procesamiento.
 
 ## Contribución
 
