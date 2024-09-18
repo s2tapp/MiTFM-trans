@@ -96,7 +96,7 @@ def process_wav2vec(audio):
             # Calcular la confianza media
             confianza_media = round( max_probabilities.mean().item(), 3)  
 
-            return transcription.capitalize(), confianza_media
+            return transcription, confianza_media
         else:
             logger.info(f"Descargando modelo {model_wav2vec_id}...")
             Wav2Vec2ForCTC.from_pretrained(model_wav2vec_id, force_download=True)
