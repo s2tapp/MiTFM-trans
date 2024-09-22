@@ -4,10 +4,10 @@ import requests
 import json
 import logging
 
-
 import pika     #for rabiitMQ
 import librosa  #For managing audio file
 import torch    #For Pytorch
+
 
 #Importing  Transformers
 from transformers import WhisperForConditionalGeneration, WhisperProcessor  #openai whisper
@@ -16,7 +16,7 @@ from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor  # wav2vec
 # VALORES GLOBALES, OBTENIDOS DEL ENTORNO
 khz16 = 16000 
 log_file= os.environ.get('LOG_FILE', 's2t-processing.log')
-log_format='%(asctime)s - %(levelname)s - S2T-CONVERTER-WORKER:%(message)s'
+log_format='%(asctime)s - %(levelname)s - S2T-WORKER:%(message)s'
 audio_folder= os.path.expanduser(os.environ.get('AUDIO_FOLDER', '/tmp/audio-uploads'))
 base_dir = os.path.expanduser(os.environ.get('HF_HOME', '~/.cache/huggingface/')) + 'hub/'
 #base_dir_whisper = base_dir + "models--openai--whisper-large-v3" 
@@ -142,15 +142,22 @@ def process_wav2vec(audio):
         
 
 def load_audio(file_Path):
+    try:
     # Cargamos el fichero
-    speech, sr = librosa.load(file_Path)
-    if sr != khz16:
-        speech = librosa.resample(speech, orig_sr=sr, target_sr=khz16)
-    return speech
+        speech, sr = librosa.load(file_Path, sr = khz16)
+        if sr != khz16:
+            speech = librosa.resample(speech, orig_sr=sr, target_sr=khz16)
+        return speech
+    
+    except Exception as e:
+        logger.error(f"Error al cargar audio [{file_Path}]: {str(e)}")
+        return []
 
 def process_audio(file_path, technology):
     # Cargando el fichero de audio
     audio = load_audio(file_path)
+    if not audio.any():
+        return None
 
     if tech1 == technology:
         return process_whisper(audio)
@@ -159,43 +166,76 @@ def process_audio(file_path, technology):
     else:
         return None
 
+def download_file(file_name):
+    file_path = os.path.join(audio_folder, file_name)
+    url = downloads_url + file_name
+
+    try:
+
+        response = requests.get(url)
+        response.raise_for_status()  # Lanza una excepción para códigos de error HTTP
+       
+        with open(file_path, 'wb') as f:
+            f.write(response.content)
+            logger.info(f"Audio recibido y almacenado en '{file_path}'")
+            return file_path
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error al subir archivo de audio: {response.status_code} [{str(e)}]")
+        return None
+
+# Función CALLBACK para procesar cada mensaje MQ
 def consume_and_respond(ch, method, properties, body):
+    elapsedTime = -1
+    confianza_media = 0
     try:
         # Deserializar el mensaje como un diccionario
         message = json.loads(body.decode("utf-8"))
-        logger.info(f"Mensaje recibido: {message}")
+        logger.info(f"Procesando petición. Mensaje: [{message}]")
 
         # Extraer audioName y la tecnología del diccionario
         technology = message.get("technology")
         audioName = message.get("audioName")
 
-        logger.info(f"Procesando audio '{audioName}' usando tecnología '{technology}'")
+#       logger.info(f"Procesando audio '{audioName}' usando tecnología '{technology}'.")
 
+        startTime = time.time()
         filePath = download_file(audioName)
+        uploadTime = time.time() - startTime
         
-        if filePath:
-            startTime = time.time()
-            transcription, confianza_media = process_audio(filePath, technology)
+        if not filePath:
+            elapsedTime = round(uploadTime, 3)
+            response = {
+                "respuesta": "No se ha podido descargar el archivo.",
+                "confianza": confianza_media,
+                "tiempoProceso": elapsedTime
+            }            
+            logger.error("No se ha podido descargar el archivo.")
 
+        else:
+            transcription, confianza_media = process_audio(filePath, technology)
             endTime = time.time()
             elapsedTime = round(endTime - startTime, 3)
+            predictTime = endTime - (startTime + uploadTime)
+            totalTime = f"{elapsedTime}s ({round(uploadTime, 4)}U+{round(predictTime, 4)}P)"
+
             response = {
                 "respuesta": transcription if transcription is not None else "No se ha podido transcribir.",
                 "confianza": confianza_media,
                 "tiempoProceso": elapsedTime
             }
-            logger.info(f"Transcripción: {transcription}, Confianza: {confianza_media}, Tiempo de proceso: {elapsedTime} segundos")
-        else:
-            response = {
-                "respuesta": "No se ha podido descargar el archivo."
-            }            
-            logger.error("No se ha podido descargar el archivo.")
+            logger.info(f"Transcripción: {transcription}, "
+                        f"Confianza: {confianza_media}, "
+                        f"Tiempo de respuesta: {totalTime}.")
 
     except Exception as e:
-        logger.error(f"Error procesando audio: {str(e)}")
+        logger.error(f"Error procesando petición: {str(e)}")
         response = {
-            "respuesta": "Error procesando audio"
+            "respuesta": "Error procesando petición",
+            "confianza": confianza_media,
+            "tiempoProceso": elapsedTime
         }
+
     finally:
         # Publicar la transcripción o el error como respuesta
         ch.basic_publish(
@@ -207,21 +247,6 @@ def consume_and_respond(ch, method, properties, body):
         # Confirmar que se ha procesado el mensaje
         ch.basic_ack(delivery_tag=method.delivery_tag)
 
-def download_file(file_name):
-    file_path = os.path.join(audio_folder, file_name)
-    url = downloads_url + file_name
-
-    try:
-        response = requests.get(url)
-        response.raise_for_status()  # Lanza una excepción para códigos de error HTTP
-       
-        with open(file_path, 'wb') as f:
-            f.write(response.content)
-            logger.info(f"Archivo descargado como '{file_name}'")
-            return file_path
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error al descargar el archivo: {response.status_code}")
-        return None
 
 # Preparación del bucle central de procesamiento
 os.makedirs(audio_folder, exist_ok=True)
@@ -234,7 +259,7 @@ channel.queue_declare(queue='audio_queue', durable=True)
 channel.basic_consume(queue='audio_queue', on_message_callback=consume_and_respond)
 
 try:
-    logger.info('Esperando mensajes...')
+    logger.info('Esperando Peticiones ...')
     channel.start_consuming()
 except KeyboardInterrupt:
     logger.info("Proceso interrumpido")
